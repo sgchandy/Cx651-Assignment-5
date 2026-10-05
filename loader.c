@@ -1,7 +1,7 @@
 #include "loader.h"
 #include <sys/mman.h>
 #include <errno.h>
-
+#include <string.h>
 
 /*
  * Loads an image from a raw image file using memory-mapped I/O.
@@ -27,6 +27,20 @@
  * Returns 0 on success, or -1 if the file cannot be opened or mapped.
  */
 int loadimage_mmap(char* filename, struct image* image) {
+	
+	size_t size = sizeof(struct image) + image->width * image->height * sizeof(struct pixel);
+	int fd = open(filename, O_RDONLY);
+	if (fd == -1) return -1;
+	void* map = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+	if (map == MAP_FAILED) {
+		close(fd);
+		return -1;
+	}
+	memcpy(image, map, sizeof(struct image));
+	image->pixels = (struct pixel*)((char*)map + sizeof(struct image));
+	// The caller is responsible for calling munmap() on image->pixels - sizeof(struct image)
+	
+	close(fd);
 	return 0;
 }
 
@@ -47,6 +61,29 @@ int loadimage_mmap(char* filename, struct image* image) {
  * A failed flush to disk is reported but still returns 0.
  */
 int saveimage_mmap(char* filename, struct image* image) {
+	
+	size_t size = sizeof(struct image) + image->width * image->height * sizeof(struct pixel);
+
+	int fd = open(filename, O_RDWR | O_CREAT | O_TRUNC, 0644);
+	if (fd == -1) return -1;
+
+	if (ftruncate(fd, size) == -1) {
+		close(fd);
+		return -1;
+	}
+
+	void* map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (map == MAP_FAILED) {
+		close(fd);
+		return -1;
+	}
+
+	memcpy(map, image, sizeof(struct image));
+	memcpy((char*)map + sizeof(struct image), image->pixels, image->width * image->height * sizeof(struct pixel));
+
+	msync(map, size, MS_SYNC);
+	munmap(map, size);
+	close(fd);
 	return 0;
 }
 
@@ -79,9 +116,7 @@ int loadimage(char* filename, struct image* image) {
 
 	lseek(fd, header.offset, SEEK_SET);
 
-	/* Start from the last row */
 	y = infoHeader.height - 1;
-
 	image->pixels = malloc(sizeof(struct pixel) * image->width * image->height);
 
 	do {
@@ -93,8 +128,7 @@ int loadimage(char* filename, struct image* image) {
             image->pixels[x + y * image->width].b =  color[2];
 		}
 		lseek(fd, padding, SEEK_CUR);
-	} while (y-- > 0); /* The post-increment here is important not
-			    * to miss the last row. */
+	} while (y-- > 0);
 
 	close(fd);
 	return 0;
